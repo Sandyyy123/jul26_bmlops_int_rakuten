@@ -119,3 +119,6 @@ mlops_backup_*.sql
 
 # --- Fichiers temporaires de test ---
 input.json
+
+# --- Raw Rakuten data: never commit (CSV files and 84,916 images) ---
+src/data/raw/
