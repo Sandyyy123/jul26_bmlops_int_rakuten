@@ -3,20 +3,16 @@
 from __future__ import annotations
 
 import logging
-from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import StandardScaler
-from sklearn.feature_extraction.text import TfidfVectorizer
+
 import pandas as pd
 from sklearn.compose import ColumnTransformer
-from sklearn.impute import SimpleImputer
+from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.model_selection import train_test_split
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
 from sqlalchemy import select
-from src.features.image_features import ImageEmbeddingTransformer
 
 from src.config import settings
 from src.data.db import RawSample, get_session
+from src.features.image_features import ImageEmbeddingTransformer
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +51,7 @@ def load_dataframe(limit: int | None = None, min_id: int | None = None) -> pd.Da
 #def get_feature_columns(df: pd.DataFrame) -> list[str]:
 #    return [c for c in df.columns if c != TARGET]
 def get_feature_columns(df: pd.DataFrame) -> list[str]:
-    return ["designation", "description", "productid", "imageid", "image_path"]
+    return ["designation", "description", "image_path"]
 
 
 def split_xy(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
@@ -65,8 +61,6 @@ def split_xy(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
 
     X["designation"] = X["designation"].fillna("").astype(str)
     X["description"] = X["description"].fillna("").astype(str)
-    X["productid"] = pd.to_numeric(X["productid"], errors="coerce")
-    X["imageid"] = pd.to_numeric(X["imageid"], errors="coerce")
     # image_path reste une chaîne (ou None) : gérée directement par ImageEmbeddingTransformer
 
     y = df[TARGET].astype(int)
@@ -78,10 +72,6 @@ def build_preprocessor(feature_names):
         transformers=[
             ("text_designation", TfidfVectorizer(max_features=5000), "designation"),
             ("text_description", TfidfVectorizer(max_features=5000), "description"),
-            ("num", Pipeline([
-                ("imputer", SimpleImputer(strategy="median")),
-                ("scaler", StandardScaler()),
-            ]), ["productid", "imageid"]),
             ("image", ImageEmbeddingTransformer(), ["image_path"]),
         ],
         remainder="drop",
