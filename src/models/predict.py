@@ -10,12 +10,15 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import joblib
 import mlflow
+import mlflow.sklearn
 import pandas as pd
+from mlflow.tracking import MlflowClient
 from src.config import settings, setup_logging
 from src.data.db import Prediction, get_session
 from src.features.build_features import load_dataframe, prepare_frame
@@ -31,12 +34,42 @@ class ModelNotFoundError(RuntimeError):
     """Aucun modèle entraîné n'est disponible."""
 
 
+CHAMPION_ALIAS = "champion"  # must match src/models/training.py
+
+
+def _load_from_registry() -> dict[str, Any]:
+    """Load the model that the @champion alias points to in the MLflow registry."""
+    mlflow.set_tracking_uri(settings.mlflow_tracking_uri)
+    client = MlflowClient()
+    name = settings.mlflow_registered_model_name
+    model_version = client.get_model_version_by_alias(name, CHAMPION_ALIAS)
+    pipeline = mlflow.sklearn.load_model(f"models:/{name}@{CHAMPION_ALIAS}")
+    run = client.get_run(model_version.run_id)
+    return {
+        "pipeline": pipeline,
+        "feature_names": list(pipeline.feature_names_in_),
+        "model_name": settings.model_name,
+        "version": f"registry-v{model_version.version}",
+        "trained_at": datetime.fromtimestamp(run.info.start_time / 1000, tz=UTC).isoformat(),
+        "metrics": dict(run.data.metrics),
+        "mlflow_model_version": str(model_version.version),
+        "source": "registry",
+    }
+
+
 def load_artifact(force_reload: bool = False) -> dict[str, Any]:
-    """Charge l'artefact depuis le disque, avec cache mémoire."""
+    """Load the served model: the registry @champion first, the local file as fallback."""
     global _ARTIFACT
 
     if _ARTIFACT is not None and not force_reload:
         return _ARTIFACT
+
+    try:
+        _ARTIFACT = _load_from_registry()
+        logger.info("Model loaded from the registry (%s)", _ARTIFACT["version"])
+        return _ARTIFACT
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Registry @%s unavailable (%s); using the local file", CHAMPION_ALIAS, exc)
 
     if not settings.model_path.exists():
         raise ModelNotFoundError(
@@ -45,6 +78,7 @@ def load_artifact(force_reload: bool = False) -> dict[str, Any]:
         )
 
     _ARTIFACT = joblib.load(settings.model_path)
+    _ARTIFACT.setdefault("source", "local")
     logger.info("Modèle chargé (version %s)", _ARTIFACT["version"])
     return _ARTIFACT
 
@@ -58,6 +92,8 @@ def model_info() -> dict[str, Any]:
         "trained_at": artifact["trained_at"],
         "n_features": len(artifact["feature_names"]),
         "metrics": artifact["metrics"],
+        "source": artifact.get("source", "local"),
+        "mlflow_model_version": artifact.get("mlflow_model_version"),
     }
 
 

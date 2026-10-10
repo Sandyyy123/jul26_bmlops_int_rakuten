@@ -11,7 +11,7 @@ from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
-from src.config import ensure_dirs, settings, setup_logging
+from src.config import ensure_dirs, setup_logging
 from src.data.db import init_db, ping
 from src.models import predict as predict_module
 from src.models.predict import ModelNotFoundError
@@ -101,7 +101,11 @@ class PredictResponse(BaseModel):
 @app.get("/health", tags=["monitoring"])
 def health() -> dict[str, Any]:
     """État de l'API, de la base et du modèle."""
-    model_available = settings.model_path.exists()
+    try:
+        predict_module.load_artifact()  # registry @champion first, local file as fallback
+        model_available = True
+    except Exception:  # noqa: BLE001
+        model_available = False
     return {
         "status": "ok",
         "database": "up" if ping() else "down",

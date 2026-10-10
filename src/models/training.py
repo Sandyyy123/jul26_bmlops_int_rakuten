@@ -35,6 +35,8 @@ from src.features.build_features import (
 
 logger = logging.getLogger(__name__)
 
+CHAMPION_ALIAS = "champion"  # registry alias of the model the API serves
+CHALLENGER_ALIAS = "challenger"  # registry alias of the latest rejected model
 PRIMARY_METRIC = "weighted_f1"  # métrique utilisée pour départager les modèles (cf. OBJECTIVES.md)
 
 
@@ -85,17 +87,27 @@ def _setup_mlflow() -> None:
     mlflow.set_experiment(settings.mlflow_experiment_name)
 
 
-def _get_production_version(client: MlflowClient, model_name: str):
-    """Retourne (version, metrics) du modèle actuellement en Production, ou (None, None)."""
+def _get_champion_version(client: MlflowClient, model_name: str):
+    """Return (version, metrics) of the model with the @champion alias, or (None, None).
+
+    One-time migration: if no alias exists yet but a version is in the old
+    "Production" stage, the alias is set on that version."""
     try:
-        versions = client.get_latest_versions(model_name, stages=["Production"])
+        version = client.get_model_version_by_alias(model_name, CHAMPION_ALIAS)
     except Exception:
-        return None, None
+        version = None
 
-    if not versions:
-        return None, None
+    if version is None:
+        try:
+            legacy = client.get_latest_versions(model_name, stages=["Production"])
+        except Exception:
+            legacy = []
+        if not legacy:
+            return None, None
+        version = legacy[0]
+        client.set_registered_model_alias(model_name, CHAMPION_ALIAS, version.version)
+        logger.info("Migration: @%s set on Production version %s", CHAMPION_ALIAS, version.version)
 
-    version = versions[0]
     run = client.get_run(version.run_id)
     return version.version, run.data.metrics
 
@@ -109,7 +121,7 @@ def _compare_and_promote(
     """Charge la version Production actuelle, la compare au nouveau modèle sur
     PRIMARY_METRIC, et promeut/rétrograde en conséquence. Tag 'best_model' posé
     sur chaque version pour une lecture rapide sans interroger les stages."""
-    prev_version, prev_metrics = _get_production_version(client, model_name)
+    prev_version, prev_metrics = _get_champion_version(client, model_name)
     new_score = new_metrics[PRIMARY_METRIC]
     prev_score = prev_metrics.get(PRIMARY_METRIC) if prev_metrics else None
 
@@ -127,16 +139,9 @@ def _compare_and_promote(
     client.set_model_version_tag(model_name, new_version, "best_model", "true" if is_best else "false")
     client.set_model_version_tag(model_name, new_version, PRIMARY_METRIC, str(new_score))
 
-    # transition_model_version_stage est marqué "legacy" dans les versions récentes
-    # de MLflow (remplacé par les alias) mais reste fonctionnel et largement utilisé.
-    if is_best:
-        client.transition_model_version_stage(
-            name=model_name, version=new_version, stage="Production", archive_existing_versions=True,
-        )
-    else:
-        client.transition_model_version_stage(
-            name=model_name, version=new_version, stage="Staging", archive_existing_versions=False,
-        )
+    # Promotion moves the @champion alias; the API serves whatever @champion points to.
+    alias = CHAMPION_ALIAS if is_best else CHALLENGER_ALIAS
+    client.set_registered_model_alias(model_name, alias, new_version)
 
     logger.info("Comparaison MLflow : %s (version %s) — %s", decision, new_version, reason)
 
@@ -290,8 +295,11 @@ def train(
         "mlflow_run_id": run_id,
         "mlflow_model_version": new_model_version,
     }
-    joblib.dump(artifact, settings.model_path)
-    logger.info("Modèle enregistré (local) : %s", settings.model_path)
+    if comparison["decision"] == "promoted":
+        joblib.dump(artifact, settings.model_path)
+        logger.info("Modèle enregistré (local) : %s", settings.model_path)
+    else:
+        logger.info("Model not promoted: local copy %s left unchanged", settings.model_path)
 
     summary = {
         "model_name": settings.model_name,
