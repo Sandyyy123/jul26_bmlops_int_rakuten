@@ -12,6 +12,7 @@ from typing import Any
 import joblib
 import mlflow
 import mlflow.sklearn
+import yaml
 from mlflow.tracking import MlflowClient
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
@@ -78,6 +79,18 @@ def _dataset_fingerprint() -> str:
         if path.exists():
             hasher.update(path.read_bytes())
     return hasher.hexdigest()[:12]
+
+
+def _dvc_dataset_hashes() -> dict[str, str]:
+    """Return {dataset: md5} from the DVC pointer files (*.dvc) next to the raw data.
+
+    `dvc add` (DVC without Git) writes one pointer file per dataset; logging these
+    hashes to MLflow records exactly which data version trained each model."""
+    hashes: dict[str, str] = {}
+    for pointer in sorted(RAW_DATA_DIR.glob("*.dvc")):
+        for out in yaml.safe_load(pointer.read_text()).get("outs", []):
+            hashes[out["path"]] = out["md5"]
+    return hashes
 
 
 def _setup_mlflow() -> None:
@@ -244,6 +257,11 @@ def train(
             "data_fingerprint": _dataset_fingerprint(),
             "version": version,
         })
+        dvc_hashes = _dvc_dataset_hashes()
+        mlflow.set_tags(
+            {f"dvc_md5.{name}": md5 for name, md5 in dvc_hashes.items()}
+            or {"dvc_md5": "none: no .dvc pointer files, run dvc add"}
+        )
         mlflow.log_metrics({
             "accuracy": metrics["accuracy"],
             "weighted_f1": metrics["weighted_f1"],
@@ -254,6 +272,8 @@ def train(
         if os.getenv("MLFLOW_LOG_ARTIFACTS", "true").lower() != "false":
              mlflow.log_dict(metrics["report"], "classification_report.json")
              mlflow.log_dict({"confusion_matrix": metrics["confusion_matrix"]}, "confusion_matrix.json")
+             for pointer in sorted(RAW_DATA_DIR.glob("*.dvc")):
+                 mlflow.log_artifact(str(pointer), artifact_path="dvc")
         
         mlflow.sklearn.log_model(
             sk_model=pipeline,
