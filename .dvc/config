@@ -1,2 +1,6 @@
 [core]
     no_scm = True
+    remote = dagshub
+['remote "dagshub"']
+    url = s3://dvc
+    endpointurl = https://dagshub.com/grover.sandeep/jul26_bmlops_int_rakuten.s3
