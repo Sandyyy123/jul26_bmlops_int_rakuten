@@ -10,6 +10,8 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -35,6 +37,10 @@ class ModelNotFoundError(RuntimeError):
 
 
 CHAMPION_ALIAS = "champion"  # must match src/models/training.py
+# Behind nginx there are several API copies; only the copy that ran /training reloads at once.
+# Every copy re-checks the @champion alias at most this often (seconds) and reloads if it moved.
+CHAMPION_REFRESH_SECONDS = float(os.getenv("CHAMPION_REFRESH_SECONDS", "30"))
+_LAST_CHECK = 0.0
 
 
 def _load_from_registry() -> dict[str, Any]:
@@ -57,13 +63,34 @@ def _load_from_registry() -> dict[str, Any]:
     }
 
 
+def _champion_changed() -> bool:
+    """True if @champion now points to another version than the model in memory."""
+    mlflow.set_tracking_uri(settings.mlflow_tracking_uri)
+    current = MlflowClient().get_model_version_by_alias(
+        settings.mlflow_registered_model_name, CHAMPION_ALIAS
+    )
+    return str(current.version) != _ARTIFACT.get("mlflow_model_version")
+
+
 def load_artifact(force_reload: bool = False) -> dict[str, Any]:
     """Load the served model: the registry @champion first, the local file as fallback."""
-    global _ARTIFACT
+    global _ARTIFACT, _LAST_CHECK
 
     if _ARTIFACT is not None and not force_reload:
-        return _ARTIFACT
+        if time.monotonic() - _LAST_CHECK < CHAMPION_REFRESH_SECONDS:
+            return _ARTIFACT
+        _LAST_CHECK = time.monotonic()
+        try:
+            if not _champion_changed():
+                return _ARTIFACT
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Could not check @%s (%s); keeping the model in memory", CHAMPION_ALIAS, exc
+            )
+            return _ARTIFACT
+        logger.info("@%s moved: reloading the model", CHAMPION_ALIAS)
 
+    _LAST_CHECK = time.monotonic()
     try:
         _ARTIFACT = _load_from_registry()
         logger.info("Model loaded from the registry (%s)", _ARTIFACT["version"])

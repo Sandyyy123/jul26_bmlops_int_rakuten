@@ -3,5 +3,8 @@ global:
 
 scrape_configs:
   - job_name: "rakuten_api"
-    static_configs:
-      - targets: ["api:8000"]
+    # Find every copy of the "api" service through Docker's DNS (one or several copies).
+    dns_sd_configs:
+      - names: ["api"]
+        type: A
+        port: 8000

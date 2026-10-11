@@ -1,0 +1,22 @@
+# Load balancing: several copies of the API behind an nginx gateway.
+# Start:  docker compose -f docker-compose.yml -f docker-compose.lb.yml up -d db api nginx
+# Copies: API_REPLICAS=3 docker compose -f docker-compose.yml -f docker-compose.lb.yml up -d api
+services:
+  api:
+    container_name: !reset null  # several copies cannot share one fixed name
+    ports: !reset []             # only nginx publishes port 8000
+    deploy:
+      replicas: ${API_REPLICAS:-2}
+    environment:
+      CHAMPION_REFRESH_SECONDS: "30"  # each copy re-checks @champion every 30 s
+
+  nginx:
+    image: nginx:1.30.5-alpine
+    container_name: mlops_nginx
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "8000:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
